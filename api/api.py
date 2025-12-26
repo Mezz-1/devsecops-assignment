@@ -1,90 +1,104 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import sqlite3
-import pickle
 import subprocess
 import hashlib
 import os
 import logging
-
+from pathlib import Path
 
 app = Flask(__name__)
 
+# Secure logging configuration
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# SECRET HARDCODÉ (mauvaise pratique)
-API_KEY = "API-KEY-123456"
-
-
-# Logging non sécurisé
-logging.basicConfig(level=logging.DEBUG)
+BASE_DIR = Path("/app/data").resolve()
 
 
 @app.route("/auth", methods=["POST"])
 def auth():
-    username = request.json.get("username")
-    password = request.json.get("password")
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", "")
+    password = data.get("password", "")
 
-
-    # SQL Injection
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
-    query = f"SELECT * FROM users WHERE username='{username}' AND password='{password}'"
-    cursor.execute(query)
 
+    # ✅ Parameterized query (no SQL injection)
+    cursor.execute(
+        "SELECT 1 FROM users WHERE username=? AND password=?",
+        (username, password)
+    )
 
-    if cursor.fetchone():
-        return {"status": "authenticated"}
-    return {"status": "denied"}
+    result = cursor.fetchone()
+    conn.close()
+
+    if result:
+        return jsonify(status="authenticated")
+    return jsonify(status="denied"), 401
 
 
 @app.route("/exec", methods=["POST"])
 def exec_cmd():
-    cmd = request.json.get("cmd")
-    # Command Injection
-    output = subprocess.check_output(cmd, shell=True)
-    return {"output": output.decode()}
+    data = request.get_json(silent=True) or {}
+    cmd = data.get("cmd")
+
+    if not isinstance(cmd, list):
+        return jsonify(error="Command must be a list"), 400
+
+    # ✅ No shell=True
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False
+    )
+
+    return jsonify(output=result.stdout)
 
 
 @app.route("/deserialize", methods=["POST"])
 def deserialize():
-    data = request.data
-    # Désérialisation dangereuse
-    obj = pickle.loads(data)
-    return {"object": str(obj)}
+    # ❌ Dangerous deserialization removed
+    return jsonify(error="Deserialization not allowed"), 403
 
 
 @app.route("/encrypt", methods=["POST"])
 def encrypt():
-    text = request.json.get("text", "")
-    # Chiffrement faible
-    hashed = hashlib.md5(text.encode()).hexdigest()
-    return {"hash": hashed}
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+
+    # ✅ Strong hash
+    hashed = hashlib.sha256(text.encode()).hexdigest()
+    return jsonify(hash=hashed)
 
 
 @app.route("/file", methods=["POST"])
 def read_file():
-    filename = request.json.get("filename")
-    # Path Traversal
-    with open(filename, "r") as f:
-        return {"content": f.read()}
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename", "")
 
+    file_path = (BASE_DIR / filename).resolve()
 
-@app.route("/debug", methods=["GET"])
-def debug():
-    # Divulgation d'informations sensibles
-    return {
-        "api_key": API_KEY,
-        "env": dict(os.environ),
-        "cwd": os.getcwd()
-    }
+    # ✅ Prevent path traversal
+    if not str(file_path).startswith(str(BASE_DIR)):
+        return jsonify(error="Invalid file path"), 400
+
+    if not file_path.exists():
+        return jsonify(error="File not found"), 404
+
+    return jsonify(content=file_path.read_text())
 
 
 @app.route("/log", methods=["POST"])
 def log_data():
-    data = request.json
-    # Log Injection
-    logging.info(f"User input: {data}")
-    return {"status": "logged"}
+    data = request.get_json(silent=True)
+
+    # ✅ Safe logging
+    logger.info("User input received")
+    return jsonify(status="logged")
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # ✅ debug disabled
+    app.run(host="0.0.0.0", port=5000, debug=False)
